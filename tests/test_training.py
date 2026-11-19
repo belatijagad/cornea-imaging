@@ -17,7 +17,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from cornea.config import DEFAULT_CONFIG, load_config
-from cornea.model import CorneaClassifier, available_backbones, create_backbone
+from cornea.model import BACKBONES, CorneaClassifier, create_backbone
 from cornea.trainer import Trainer, TrainerConfig, classification_metrics
 from scripts.run import assign_folds, create_sweep_directory, main, parse_config
 
@@ -71,6 +71,7 @@ class TrainingTests(unittest.TestCase):
                     return CorneaClassifier(**kwargs)
 
             config = load_config()
+            config.data.preprocessed_images_csv = None
             config.model.backbones = ["resnet18", "swin_t"]
             config.model.freeze_backbone = [False, True]
             config.trainer.threshold = 0.7
@@ -149,7 +150,7 @@ class TrainingTests(unittest.TestCase):
 
     def test_backbone_factory(self):
         torch.set_num_threads(2)
-        for name in available_backbones():
+        for name in BACKBONES:
             with self.subTest(backbone=name):
                 model = CorneaClassifier(backbone=name, pretrained=False, freeze_backbone=True).train()
                 self.assertFalse(model.backbone.training)
@@ -188,14 +189,27 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(config.model.freeze_backbone, [True])
         self.assertEqual(config.trainer.learning_rate, DEFAULTS.trainer.learning_rate)
         self.assertEqual(config.data, DEFAULTS.data)
+        self.assertEqual(config.transforms, DEFAULTS.transforms)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yml"
             config.save(path)
-            self.assertEqual(set(yaml.safe_load(path.read_text())), {"model", "trainer", "data"})
+            values = yaml.safe_load(path.read_text())
+            self.assertEqual(set(values), {"model", "trainer", "data", "transforms"})
+            self.assertEqual(load_config(path), config)
+            for key in ("folds", "batch_size", "num_workers"):
+                values["data"][key] = values["trainer"].pop(key)
+            transforms = values.pop("transforms")
+            values["data"].update(transforms.pop("augment"))
+            values["data"].update(transforms)
+            path.write_text(yaml.safe_dump(values))
             self.assertEqual(load_config(path), config)
         self.assertEqual(parse_config(["--freeze-backbone", "false", "true"]).model.freeze_backbone,
                          [False, True])
         self.assertEqual(parse_config(["--no-freeze-backbone"]).model.freeze_backbone, [False])
+        self.assertEqual(parse_config(["--preprocessed-images-csv", "cache.csv"]).data.preprocessed_images_csv,
+                         Path("cache.csv"))
+        self.assertTrue(parse_config(["--medsam"]).data.medsam)
+        self.assertEqual(parse_config(["--cornea-boxes-csv", "boxes.csv"]).data.cornea_boxes_csv, Path("boxes.csv"))
         self.assertEqual(load_config(overrides={"model": {"freeze_backbone": False}}).model.freeze_backbone,
                          [False])
         for overrides in (
@@ -206,7 +220,8 @@ class TrainingTests(unittest.TestCase):
             {"model": {"freeze_backbone": [0, 1]}},
             {"model": {"backbones": ["missing"]}},
             {"model": {"backbones": ["resnet18", "resnet18"]}},
-            {"data": {"folds": 1}},
+            {"trainer": {"folds": 1}},
+            {"data": {"medsam": True, "cornea_boxes_csv": "boxes.csv"}},
             {"trainer": {"validation_interval": 0}},
             {"trainer": {"validation_interval": -1}},
             {"trainer": {"validation_interval": 1.5}},
@@ -214,7 +229,7 @@ class TrainingTests(unittest.TestCase):
             {"trainer": {"precision": "invalid"}},
             {"model": {"backbones": ["mobilenet_v3_small"]}},
             {"model": {"backbones": ["vit_b_16"]}},
-            {"model": {"backbones": ["maxvit_t"]}, "data": {"image_size": 64}},
+            {"model": {"backbones": ["maxvit_t"]}, "transforms": {"image_size": 64}},
         ):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 load_config(DEFAULT_CONFIG, overrides)
@@ -283,7 +298,6 @@ class TrainingTests(unittest.TestCase):
                             model.weight.fill_(current_epoch)
                         return 0.5
                     validated_epochs.append(current_epoch)
-                    # The second validation is best; subsequent checks get worse.
                     loss = 0.1 if len(validated_epochs) == 2 else 0.5
                     probabilities = (
                         [[0.9], [0.8], [0.2], [0.1]] if len(validated_epochs) == 1 else

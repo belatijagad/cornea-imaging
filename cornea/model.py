@@ -16,13 +16,9 @@ BACKBONES = {
 }
 
 
-def available_backbones():
-    return tuple(BACKBONES)
-
-
 def create_backbone(name, pretrained=True):
     if name not in BACKBONES:
-        raise ValueError(f"Unknown backbone {name!r}; choose from {available_backbones()}")
+        raise ValueError(f"Unknown backbone {name!r}; choose from {tuple(BACKBONES)}")
     weights = models.get_model_weights(name).DEFAULT if pretrained else None
     backbone = models.get_model(name, weights=weights)
     head_name = BACKBONES[name]

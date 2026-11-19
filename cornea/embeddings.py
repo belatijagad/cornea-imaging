@@ -10,7 +10,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 from torch.utils.data import DataLoader
 
-from cornea.checkpoints import fold_directory, load_checkpoint
+from cornea.checkpoints import load_checkpoint
 from cornea.config import load_config
 from cornea.dataset import CorneaDataset, load_manifest, make_transforms
 from cornea.model import CorneaClassifier
@@ -18,14 +18,9 @@ from cornea.plots.embeddings import COMPONENTS, plot_projection
 
 
 def checkpoint_path(run, backbone, mode, fold):
-    modern = fold_directory(run, backbone, mode, fold) / "best.pt"
+    modern = Path(run) / "folds" / backbone / mode / f"fold_{fold}" / "best.pt"
     legacy = run / backbone / mode / f"fold_{fold}" / "best.pt"
     return legacy if not modern.exists() and legacy.exists() else modern
-
-
-def embedding_directory(run, backbone, mode, fold, *, base=False, clusters=3):
-    name = f"{backbone}_imagenet_whole_data_k{clusters}" if base else f"{backbone}_{mode}_fold_{fold}"
-    return run / "embeddings" / name
 
 
 def load_embeddings(frame, config, backbone, checkpoint, cache):
@@ -41,8 +36,8 @@ def load_embeddings(frame, config, backbone, checkpoint, cache):
             load_checkpoint(model, checkpoint)
         model.to(device).eval()
         loader = DataLoader(
-            CorneaDataset(frame, make_transforms(config.data), config.data.labels),
-            batch_size=config.data.batch_size, num_workers=config.data.num_workers,
+            CorneaDataset(frame, make_transforms(config.transforms), config.data.labels),
+            batch_size=config.trainer.batch_size, num_workers=config.trainer.num_workers,
         )
         print(f"Extracting {backbone} features on {device}", flush=True)
         with torch.inference_mode():
@@ -69,7 +64,8 @@ def project_embeddings(run, backbone, mode="unfrozen", fold=1, *, base=False, cl
     run = Path(run)
     config = load_config(run / "config.yml")
     frame = load_manifest(run, config)
-    out = embedding_directory(run, backbone, mode, fold, base=base, clusters=clusters)
+    name = f"{backbone}_imagenet_whole_data_k{clusters}" if base else f"{backbone}_{mode}_fold_{fold}"
+    out = run / "embeddings" / name
     checkpoint = None if base else checkpoint_path(run, backbone, mode, fold)
     features = load_embeddings(frame, config, backbone, checkpoint, out / "embeddings.npy")
     pca = PCA(n_components=3, svd_solver="full")

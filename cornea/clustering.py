@@ -11,7 +11,7 @@ from sklearn.preprocessing import normalize
 
 from cornea.config import load_config
 from cornea.dataset import load_manifest
-from cornea.embeddings import checkpoint_path, embedding_directory, load_embeddings
+from cornea.embeddings import checkpoint_path, load_embeddings
 from cornea.plots.clustering import plot_boundary_slices
 from cornea.plots.embeddings import CLASS_NAMES
 from cornea.reports import write_classification_report
@@ -33,23 +33,6 @@ def clustering_cases(frame, config, exclude_other):
     return keep, targets, CLASS_NAMES
 
 
-def clustering_directory(run, backbone, exclude_other):
-    design = "k3_without_other" if exclude_other else "k4"
-    return run / "clustering_cv" / f"{backbone}_unfrozen_pca3_{design}"
-
-
-def fit_clusters(features, labels, n_classes, seed):
-    pca = PCA(n_components=3, svd_solver='full').fit(features)
-    coordinates = pca.transform(features)
-    model = KMeans(n_clusters=n_classes, n_init=30, random_state=seed).fit(coordinates)
-    counts = np.zeros((n_classes, n_classes), dtype=int)
-    np.add.at(counts, (model.labels_, labels), 1)
-    clusters, classes = linear_sum_assignment(-counts)
-    mapping = np.empty(n_classes, dtype=int)
-    mapping[clusters] = classes
-    return pca, model, mapping, counts
-
-
 def evaluate_clustering(run, backbone="resnet18", *, exclude_other=False):
     run = Path(run)
     config = load_config(run / "config.yml")
@@ -59,7 +42,8 @@ def evaluate_clustering(run, backbone="resnet18", *, exclude_other=False):
     keep, targets, names = clustering_cases(original_frame, config, exclude_other)
     frame = original_frame.loc[keep].reset_index(drop=True)
     n_classes = len(names)
-    output = clustering_directory(run, backbone, exclude_other)
+    design = "k3_without_other" if exclude_other else "k4"
+    output = run / "clustering_cv" / f"{backbone}_unfrozen_pca3_{design}"
     output.mkdir(parents=True, exist_ok=True)
     predictions = np.full(len(frame), -1, dtype=int)
     baseline = np.full(len(frame), -1, dtype=int)
@@ -67,16 +51,24 @@ def evaluate_clustering(run, backbone="resnet18", *, exclude_other=False):
     details = []
     assignments = frame['fold'].to_numpy()
     classes = range(n_classes)
-    for fold in range(config.data.folds):
+    for fold in range(config.trainer.folds):
         train = assignments != fold
         held_out = ~train
         if np.unique(targets[train]).size != n_classes or not held_out.any():
             raise ValueError(f"Fold {fold + 1} needs all training classes and held-out cases")
-        cache = embedding_directory(run, backbone, "unfrozen", fold + 1) / "embeddings.npy"
+        cache = run / "embeddings" / f"{backbone}_unfrozen_fold_{fold + 1}" / "embeddings.npy"
         checkpoint = checkpoint_path(run, backbone, "unfrozen", fold + 1)
         features = load_embeddings(original_frame, config, backbone, checkpoint, cache)
         features = normalize(features[keep])
-        pca, kmeans, mapping, counts = fit_clusters(features[train], targets[train], n_classes, config.trainer.seed)
+        pca = PCA(n_components=3, svd_solver='full').fit(features[train])
+        kmeans = KMeans(n_clusters=n_classes, n_init=30, random_state=config.trainer.seed).fit(
+            pca.transform(features[train])
+        )
+        counts = np.zeros((n_classes, n_classes), dtype=int)
+        np.add.at(counts, (kmeans.labels_, targets[train]), 1)
+        clusters, matched_classes = linear_sum_assignment(-counts)
+        mapping = np.empty(n_classes, dtype=int)
+        mapping[clusters] = matched_classes
         guess = mapping[kmeans.predict(pca.transform(features[held_out]))]
         predictions[held_out] = guess
         baseline[held_out] = np.bincount(targets[train], minlength=n_classes).argmax()
@@ -119,13 +111,14 @@ def plot_cluster_boundaries(run, backbone="resnet18", *, exclude_other=False):
     config = load_config(run / "config.yml")
     frame = load_manifest(run, config)
     keep, labels, names = clustering_cases(frame, config, exclude_other)
-    output = clustering_directory(run, backbone, exclude_other)
-    folds = config.data.folds
+    design = "k3_without_other" if exclude_other else "k4"
+    output = run / "clustering_cv" / f"{backbone}_unfrozen_pca3_{design}"
+    folds = config.trainer.folds
     assignments = frame.loc[keep, 'fold'].to_numpy()
     panels = []
     slices = []
     for fold in range(1, folds + 1):
-        cache = embedding_directory(run, backbone, "unfrozen", fold) / "embeddings.npy"
+        cache = run / "embeddings" / f"{backbone}_unfrozen_fold_{fold}" / "embeddings.npy"
         features = normalize(np.load(cache)[keep])
         with np.load(output / f"fold_{fold}_transform.npz") as transform:
             xyz = (features - transform["pca_mean"]) @ transform["pca_components"].T

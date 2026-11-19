@@ -71,7 +71,6 @@ class CheckpointTests(unittest.TestCase):
             self.assertIn("model_state_dict", full)
             self.assertNotIn("backbone_path", full)
             self.assertLess((root / "best.pt").stat().st_size, (root / "full.pt").stat().st_size)
-            # Existing full checkpoints without a checkpoint_type also load.
             full.pop("checkpoint_type")
             torch.save(full, root / "legacy.pt")
             load_checkpoint(restored, root / "legacy.pt")

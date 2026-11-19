@@ -60,10 +60,6 @@ class CheckpointStore:
         _atomic_save(saved, self.path)
 
 
-def fold_directory(run, backbone, mode, fold):
-    return Path(run) / "folds" / backbone / mode / f"fold_{fold}"
-
-
 def load_checkpoint(model, path):
     path = Path(path)
     saved = torch.load(path, map_location="cpu", weights_only=True)

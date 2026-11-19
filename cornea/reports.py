@@ -21,17 +21,14 @@ def regenerate_plots(run):
     return output
 
 
-def _macro_auroc(targets, scores):
-    present = (targets.min(axis=0) != targets.max(axis=0))
-    return roc_auc_score(targets[:, present], scores[:, present], average="macro") if present.any() else np.nan
-
-
 def _classification_metrics(actual, predicted, targets, scores, classes):
+    present = (targets.min(axis=0) != targets.max(axis=0))
+    macro_auroc = roc_auc_score(targets[:, present], scores[:, present], average="macro") if present.any() else np.nan
     return {
         "accuracy": accuracy_score(actual, predicted),
         "balanced_accuracy": balanced_accuracy_score(actual, predicted),
         "macro_f1": f1_score(actual, predicted, average="macro", labels=classes, zero_division=0),
-        "macro_auroc": _macro_auroc(targets, scores),
+        "macro_auroc": macro_auroc,
     }
 
 
@@ -45,37 +42,6 @@ def write_classification_report(actual, predicted, names, out, title):
     pd.DataFrame(matrix, index=names, columns=names).to_csv(out / "confusion_matrix.csv")
     plot_class_confusion_matrix(matrix, names, out / "confusion_matrix.png", title)
     return report
-
-
-def _write_multiclass(frame, labels, names, out, title):
-    targets = frame[labels].to_numpy()
-    scores = frame[[f"{label}_probability" for label in labels]].to_numpy()
-    if not np.isfinite(scores).all():
-        raise ValueError("Multiclass probabilities must be finite")
-    actual, predicted = targets.argmax(axis=1), scores.argmax(axis=1)
-    classes = range(len(labels))
-    out.mkdir(parents=True, exist_ok=True)
-    frame.assign(true_class=names[actual], predicted_class=names[predicted]).to_csv(
-        out / "out_of_fold_predictions.csv", index=False,
-    )
-    fold_metrics = []
-    for fold, positions in frame.groupby("fold").indices.items():
-        metrics = _classification_metrics(actual[positions], predicted[positions], targets[positions], scores[positions], classes)
-        fold_metrics.append({"fold": int(fold), "images": len(positions), **metrics})
-    fold_metrics = pd.DataFrame(fold_metrics)
-    fold_metrics.to_csv(out / "fold_metrics.csv", index=False)
-    fold_metrics.drop(columns=["fold", "images"]).agg(["mean", "std"]).to_csv(out / "summary.csv")
-    write_classification_report(actual, predicted, names, out, title)
-    pooled = {
-        "images": len(frame), **_classification_metrics(actual, predicted, targets, scores, classes),
-        "majority_baseline_accuracy": float(np.bincount(actual).max() / len(frame)),
-        "prediction_rule": "Argmax of sigmoid probabilities on single-label images.",
-        "evaluation": "Pooled held-out predictions from patient-grouped folds; checkpoints selected by validation loss.",
-    }
-    if np.isnan(pooled["macro_auroc"]):
-        pooled["macro_auroc"] = None
-    (out / "pooled_metrics.json").write_text(json.dumps(pooled, indent=2))
-    print(fold_metrics.round(4).to_string(index=False))
 
 
 def summarize_multiclass(run):
@@ -101,5 +67,32 @@ def summarize_multiclass(run):
             raise ValueError(f"No single-label cases for {backbone}")
         mode = MODE_NAMES[freeze]
         destination = output if len(groups) == 1 else output / backbone / mode.lower()
-        _write_multiclass(cases, labels, names, destination, f"{backbone} · {mode}")
+        targets = cases[labels].to_numpy()
+        scores = cases[[f"{label}_probability" for label in labels]].to_numpy()
+        if not np.isfinite(scores).all():
+            raise ValueError("Multiclass probabilities must be finite")
+        actual, predicted = targets.argmax(axis=1), scores.argmax(axis=1)
+        classes = range(len(labels))
+        destination.mkdir(parents=True, exist_ok=True)
+        cases.assign(true_class=names[actual], predicted_class=names[predicted]).to_csv(
+            destination / "out_of_fold_predictions.csv", index=False,
+        )
+        fold_metrics = []
+        for fold, positions in cases.groupby("fold").indices.items():
+            metrics = _classification_metrics(actual[positions], predicted[positions], targets[positions], scores[positions], classes)
+            fold_metrics.append({"fold": int(fold), "images": len(positions), **metrics})
+        fold_metrics = pd.DataFrame(fold_metrics)
+        fold_metrics.to_csv(destination / "fold_metrics.csv", index=False)
+        fold_metrics.drop(columns=["fold", "images"]).agg(["mean", "std"]).to_csv(destination / "summary.csv")
+        write_classification_report(actual, predicted, names, destination, f"{backbone} · {mode}")
+        pooled = {
+            "images": len(cases), **_classification_metrics(actual, predicted, targets, scores, classes),
+            "majority_baseline_accuracy": float(np.bincount(actual).max() / len(cases)),
+            "prediction_rule": "Argmax of sigmoid probabilities on single-label images.",
+            "evaluation": "Pooled held-out predictions from patient-grouped folds; checkpoints selected by validation loss.",
+        }
+        if np.isnan(pooled["macro_auroc"]):
+            pooled["macro_auroc"] = None
+        (destination / "pooled_metrics.json").write_text(json.dumps(pooled, indent=2))
+        print(fold_metrics.round(4).to_string(index=False))
     return output
