@@ -89,22 +89,23 @@ class TrainingTests(unittest.TestCase):
                 if name.endswith(".png"):
                     with Image.open(output / "plots" / name) as image:
                         image.verify()
-            self.assertEqual(len(pd.read_csv(output / "out_of_fold_predictions.csv")), 64)
+            pooled = pd.read_csv(output / "out_of_fold_predictions.csv")
+            self.assertEqual(len(pooled), 64)
             combinations = list(product(config.model.backbones, config.model.freeze_backbone))
             self.assertEqual(
                 [(call.kwargs["backbone"], call.kwargs["freeze_backbone"])
                  for call in factory.call_args_list],
                 [combination for combination in combinations for _ in range(2)],
             )
-            run_dirs = []
             for backbone, freeze in combinations:
-                run_dir = output / backbone / ("frozen" if freeze else "unfrozen")
-                run_dirs.append(run_dir)
+                mode = "frozen" if freeze else "unfrozen"
+                run_dir = output / "folds" / backbone / mode
+                self.assertEqual({path.name for path in run_dir.iterdir()}, {"fold_1", "fold_2"})
                 for fold in [1, 2]:
                     fold_dir = run_dir / f"fold_{fold}"
-                    for name in ["best.pt", "history.csv", "validation_metrics.csv", "specificity.png",
-                                 "metrics.csv", "predictions.csv", "confusion_matrices.png"]:
-                        self.assertTrue((fold_dir / name).is_file(), name)
+                    self.assertEqual({path.name for path in fold_dir.iterdir()},
+                                     {"best.pt", "history.csv", "validation_metrics.csv"})
+                    self.assertTrue((output / "plots" / "training" / backbone / mode / f"fold_{fold}.png").is_file())
                     saved = torch.load(fold_dir / "best.pt", weights_only=True)
                     self.assertEqual(saved["labels"], LABELS)
                     self.assertEqual(saved["backbone"], backbone)
@@ -112,28 +113,23 @@ class TrainingTests(unittest.TestCase):
                     self.assertEqual(saved["threshold"], 0.7)
                     self.assertEqual("model_state_dict" in saved, not freeze)
                     if freeze:
-                        self.assertIn("classifier_state_dict", saved)
                         self.assertTrue((fold_dir / saved["backbone_path"]).is_file())
-                predictions = pd.concat(pd.read_csv(run_dir / f"fold_{fold}" / "predictions.csv")
-                                        for fold in [1, 2])
-                pd.testing.assert_frame_equal(
-                    pd.read_csv(run_dir / "predictions.csv").drop(columns="fold"),
-                    predictions.reset_index(drop=True),
-                )
-                self.assertTrue((run_dir / "confusion_matrices.png").is_file())
+                predictions = pooled[(pooled.backbone == backbone) & (pooled.freeze_backbone == freeze)]
                 self.assertEqual(predictions["image_path"].nunique(), 16)
                 self.assertEqual(len(predictions), 16)
-                run_metrics = pd.read_csv(run_dir / "fold_metrics.csv")
-                self.assertEqual(len(run_metrics), 6)
-                self.assertEqual(set(run_metrics.freeze_backbone), {freeze})
+            self.assertFalse(list((output / "plots").rglob("*.csv")))
             combined = pd.read_csv(output / "fold_metrics.csv")
             self.assertEqual(len(combined), 24)
             self.assertEqual(set(zip(combined.backbone, combined.freeze_backbone)), set(combinations))
-            summary = pd.read_csv(output / "summary.csv", header=[0, 1], index_col=[0, 1, 2])
-            self.assertEqual(set(summary.index.droplevel("label")), set(combinations))
+            summary = pd.read_csv(output / "summary.csv")
+            self.assertEqual(set(zip(summary.backbone, summary.freeze_backbone)), set(combinations))
+            for stat in ("mean", "std"):
+                expected = combined.groupby(["backbone", "freeze_backbone", "label"]).specificity.agg(stat)
+                actual = summary.set_index(expected.index.names)[f"specificity_{stat}"]
+                pd.testing.assert_series_equal(actual, expected, check_names=False)
             for fold in [1, 2]:
-                paths = [pd.read_csv(run_dir / f"fold_{fold}" / "predictions.csv").image_path.tolist()
-                         for run_dir in run_dirs]
+                paths = [group.image_path.tolist() for _, group in
+                         pooled.loc[pooled.fold == fold].groupby(["backbone", "freeze_backbone"])]
                 self.assertTrue(all(part == paths[0] for part in paths))
             saved_config = load_config(output / "config.yml")
             self.assertEqual(saved_config.model.backbones, config.model.backbones)

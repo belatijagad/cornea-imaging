@@ -1,4 +1,3 @@
-"""Store frozen feature extractors once and reference them from fold checkpoints."""
 import hashlib
 import os
 from pathlib import Path
@@ -61,8 +60,11 @@ class CheckpointStore:
         _atomic_save(saved, self.path)
 
 
+def fold_directory(run, backbone, mode, fold):
+    return Path(run) / "folds" / backbone / mode / f"fold_{fold}"
+
+
 def load_checkpoint(model, path):
-    """Restore weights from a full or classifier-only checkpoint and return metadata."""
     path = Path(path)
     saved = torch.load(path, map_location="cpu", weights_only=True)
     if "model_state_dict" in saved:

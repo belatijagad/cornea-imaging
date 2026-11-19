@@ -10,14 +10,13 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.metrics import multilabel_confusion_matrix
 from torch.utils.data import DataLoader
-from torchvision import transforms
 
+from cornea.checkpoints import fold_directory
 from cornea.config import DEFAULT_CONFIG, load_config
-from cornea.dataset import CorneaDataset
+from cornea.dataset import CorneaDataset, make_transforms
 from cornea.model import CorneaClassifier, available_backbones
-from cornea.plots import plot_confusion_matrices, plot_experiment_comparison, plot_sweep_confusion_matrices
+from cornea.plots import MODE_NAMES, plot_sweep
 from cornea.trainer import Trainer, TrainerConfig
 
 
@@ -56,14 +55,6 @@ def assign_folds(frame, labels, n_splits=5, seed=42):
     return frame
 
 
-def make_transforms(config, training=False):
-    operations = [transforms.Resize((config.image_size, config.image_size))]
-    if training:
-        operations += [transforms.RandomHorizontalFlip(config.horizontal_flip_probability),
-                       transforms.RandomRotation(config.rotation_degrees)]
-    return transforms.Compose(operations + [transforms.ToTensor(), transforms.Normalize(config.mean, config.std)])
-
-
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -81,9 +72,8 @@ def seed_worker(worker_id):
 
 
 def parse_config(argv=None):
-    parser = argparse.ArgumentParser(description="Run cross-validation for each configured backbone.")
+    parser = argparse.ArgumentParser(description="Run cross-validation and generate plots.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    # Keep CLI flags stable while routing overrides into their YAML sections.
     option_groups = [
         ("data", Path, ("data-root", "labels-csv")),
         ("trainer", Path, ("output-dir",)),
@@ -102,6 +92,9 @@ def parse_config(argv=None):
                         dest="trainer.precision", default=argparse.SUPPRESS)
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction,
                         dest="model.pretrained", default=argparse.SUPPRESS)
+    parser.add_argument("--embeddings", action=argparse.BooleanOptionalAction,
+                        dest="trainer.embeddings", default=argparse.SUPPRESS,
+                        help="Generate 2D and 3D embedding plots from the first fold checkpoint of each model")
     freeze_options = parser.add_mutually_exclusive_group()
     freeze_options.add_argument("--freeze-backbone", nargs="*", choices=("true", "false"),
                                 dest="model.freeze_backbone", default=argparse.SUPPRESS,
@@ -120,11 +113,9 @@ def parse_config(argv=None):
 
 
 def run_backbone(config, frame, backbone, freeze_backbone):
-    mode = "frozen" if freeze_backbone else "unfrozen"
-    output_dir = config.trainer.output_dir / backbone / mode
-    output_dir.mkdir(parents=True, exist_ok=True)
-    fold_metrics = []
-    fold_predictions = []
+    mode = MODE_NAMES[freeze_backbone].lower()
+    output_dir = config.trainer.output_dir
+    plots = output_dir / "plots" / "training" / backbone / mode
     for fold in range(config.data.folds):
         seed_everything(config.trainer.seed + fold)
         train_df = frame[frame["fold"] != fold]
@@ -147,35 +138,24 @@ def run_backbone(config, frame, backbone, freeze_backbone):
             validation_interval=config.trainer.validation_interval,
             precision=config.trainer.precision,
             weight_decay=config.trainer.weight_decay, threshold=config.trainer.threshold,
-            output_dir=output_dir / f"fold_{fold + 1}",
-            backbone_dir=config.trainer.output_dir / "backbones",
+            output_dir=fold_directory(output_dir, backbone, mode, fold + 1),
+            backbone_dir=output_dir / "folds" / "backbones",
         )
         trainer = Trainer(model, trainer_config, *loaders)
-        trainer.train()
-        fold_metrics.append(trainer.eval().assign(
-            fold=fold + 1, backbone=backbone, freeze_backbone=freeze_backbone,
-        ))
-        fold_predictions.append(pd.read_csv(trainer.output_dir / "predictions.csv").assign(fold=fold + 1))
+        trainer.train(specificity_path=plots / f"fold_{fold + 1}.png")
+        metrics, predictions = trainer.eval()
+        identifiers = {"fold": fold + 1, "backbone": backbone, "freeze_backbone": freeze_backbone}
         del trainer, model, loaders
-    metrics = pd.concat(fold_metrics, ignore_index=True)
-    metrics.to_csv(output_dir / "fold_metrics.csv", index=False)
-    summary = summarize(metrics)
-    summary.to_csv(output_dir / "summary.csv")
-    predictions = pd.concat(fold_predictions, ignore_index=True)
-    predictions.to_csv(output_dir / "predictions.csv", index=False)
-    matrices = multilabel_confusion_matrix(
-        predictions[config.data.labels],
-        predictions[[f"{label}_prediction" for label in config.data.labels]],
-    )
-    plot_confusion_matrices(matrices, config.data.labels, output_dir)
-    print(summary.round(4).to_string())
-    return metrics
+        yield metrics.assign(**identifiers), predictions.assign(**identifiers)
+
 
 
 def summarize(metrics):
-    return metrics.drop(columns=["fold", "positives"]).groupby(
+    summary = metrics.drop(columns=["fold", "positives"]).groupby(
         ["backbone", "freeze_backbone", "label"]
     ).agg(["mean", "std"])
+    summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
+    return summary.reset_index()
 
 
 def create_sweep_directory(output_root):
@@ -183,24 +163,6 @@ def create_sweep_directory(output_root):
     output_root.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y%m%d_%H%M%S")
     return Path(tempfile.mkdtemp(prefix=f"sweep_{timestamp}_", dir=output_root))
-
-
-def save_sweep_plots(metrics, config):
-    output_dir = config.trainer.output_dir
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    plot_experiment_comparison(
-        metrics, plots_dir / "experiment_comparison.png", threshold=config.trainer.threshold,
-    )
-    predictions = []
-    for backbone in config.model.backbones:
-        for freeze in config.model.freeze_backbone:
-            mode = "frozen" if freeze else "unfrozen"
-            path = output_dir / backbone / mode / "predictions.csv"
-            predictions.append(pd.read_csv(path).assign(backbone=backbone, freeze_backbone=freeze))
-    predictions = pd.concat(predictions, ignore_index=True)
-    predictions.to_csv(output_dir / "out_of_fold_predictions.csv", index=False)
-    plot_sweep_confusion_matrices(predictions, config.data.labels, plots_dir, config.trainer.threshold)
 
 
 def main(argv=None):
@@ -220,16 +182,31 @@ def main(argv=None):
         if Path(p).is_relative_to(config.data.data_root.resolve()) else p
     )
     manifest.to_csv(config.trainer.output_dir / "manifest.csv", index=False)
-    metrics = pd.concat(
-        [run_backbone(config, frame, backbone, freeze_backbone)
-         for backbone in config.model.backbones
-         for freeze_backbone in config.model.freeze_backbone], ignore_index=True
-    )
-    metrics.to_csv(config.trainer.output_dir / "fold_metrics.csv", index=False)
-    summarize(metrics).to_csv(config.trainer.output_dir / "summary.csv")
-    save_sweep_plots(metrics, config)
-    print(f"Sweep complete: {config.trainer.output_dir.resolve()}")
-    return config.trainer.output_dir
+    results = [
+        result
+        for backbone in config.model.backbones
+        for freeze in config.model.freeze_backbone
+        for result in run_backbone(config, frame, backbone, freeze)
+    ]
+    fold_metrics, fold_predictions = zip(*results)
+    metrics = pd.concat(fold_metrics, ignore_index=True)
+    predictions = pd.concat(fold_predictions, ignore_index=True)
+    output = config.trainer.output_dir
+    metrics.to_csv(output / "fold_metrics.csv", index=False)
+    predictions.to_csv(output / "out_of_fold_predictions.csv", index=False)
+    summary = summarize(metrics)
+    summary.to_csv(output / "summary.csv", index=False)
+    print(summary.round(4).to_string(index=False))
+    plot_sweep(metrics, predictions, config.data.labels, output / "plots", config.trainer.threshold)
+    if config.trainer.embeddings:
+        from cornea.embeddings import project_embeddings
+
+        for backbone in config.model.backbones:
+            for freeze in config.model.freeze_backbone:
+                mode = MODE_NAMES[freeze].lower()
+                project_embeddings(output, backbone, mode, plot_root=output / "plots" / "embeddings")
+    print(f"Sweep complete: {output.resolve()}")
+    return output
 
 
 if __name__ == "__main__":

@@ -40,6 +40,23 @@ class PlotTests(unittest.TestCase):
             np.testing.assert_allclose(ax.lines[0].get_xdata(), [.5])
         self.assertEqual([text.get_text() for text in fig.legends[0].texts], ["Unfrozen"])
 
+    def test_comparison_exports_multiple_backbones_and_freeze_modes(self):
+        metrics = pd.DataFrame([
+            {"backbone": backbone, "freeze_backbone": freeze, "fold": fold,
+             "specificity": score, "sensitivity": score - .1, "auroc": score + .05}
+            for backbone, baseline in [("resnet18", .7), ("swin_t", .8)]
+            for freeze, gain in [(True, .02), (False, .04)]
+            for fold, score in [(1, baseline + gain), (2, baseline + gain + .01)]
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "comparison.png"
+            plot_experiment_comparison(metrics, path)
+            with Image.open(path) as image:
+                image.verify()
+            svg = path.with_suffix(".svg").read_text()
+        for label in ("resnet18", "swin_t", "Frozen", "Unfrozen"):
+            self.assertIn(label, svg)
+
     def test_confusion_matrix_counts_and_row_percentages(self):
         predictions = pd.DataFrame({
             "backbone": ["resnet18"] * 4,
