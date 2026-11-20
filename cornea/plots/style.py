@@ -3,7 +3,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from cycler import cycler
 
-
 PAPER = "#faf8f2"
 INK = "#282620"
 GRID = "#ddd7cc"
@@ -38,7 +37,6 @@ STYLE = {
     "axes.axisbelow": True,
     "lines.linewidth": 1.8,
     "legend.frameon": False,
-    "svg.fonttype": "none",
 }
 
 
@@ -53,14 +51,11 @@ def figure_grid(rows, columns, panel_size, title=None, **kwargs):
     return fig, axes
 
 
-def save_figure(fig, path, *, svg=False, show=False):
-    path = Path(path)
+def save_figure(fig, path, *, show=False):
+    path = Path(path).with_suffix(".png")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=180)
-        vector_path = path.with_suffix(".svg")
-        if svg and vector_path != path:
-            fig.savefig(vector_path)
         if show:
             plt.show()
     finally:

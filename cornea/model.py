@@ -1,7 +1,6 @@
 import torch.nn as nn
 from torchvision import models
 
-
 BACKBONES = {
     "resnet18": "fc",
     "resnet34": "fc",

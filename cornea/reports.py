@@ -3,11 +3,20 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix, f1_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    roc_auc_score,
+)
 
 from cornea.config import load_config
 from cornea.dataset import load_manifest
-from cornea.plots import MODE_NAMES, plot_class_confusion_matrix, plot_sweep
+from cornea.plots import plot_sweep
+from cornea.plots.confusion import plot_class_confusion_matrix
+from cornea.plots.style import MODE_NAMES
 
 
 def regenerate_plots(run):
@@ -89,7 +98,11 @@ def summarize_multiclass(run):
             "images": len(cases), **_classification_metrics(actual, predicted, targets, scores, classes),
             "majority_baseline_accuracy": float(np.bincount(actual).max() / len(cases)),
             "prediction_rule": "Argmax of sigmoid probabilities on single-label images.",
-            "evaluation": "Pooled held-out predictions from patient-grouped folds; checkpoints selected by validation loss.",
+            "evaluation": (
+                "Pooled held-out predictions from patient-grouped folds. "
+                + ("Checkpoints saved at the final epoch." if config.trainer.checkpoint_selection == "final"
+                   else "Checkpoints selected by validation loss.")
+            ),
         }
         if np.isnan(pooled["macro_auroc"]):
             pooled["macro_auroc"] = None

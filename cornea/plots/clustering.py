@@ -23,15 +23,16 @@ def plot_boundary_slices(panels, names, backbone, output):
     columns = min(3, folds)
     rows = (folds + columns - 1) // columns
     fig, axes = figure_grid(rows, columns, (5.4, 4.8), f"{backbone} clustering boundaries")
-    for fold, (ax, panel) in enumerate(zip(axes.flat, panels), 1):
+    for fold, panel in enumerate(panels, 1):
+        ax = axes.flat[fold - 1]
         _draw_boundaries(ax, *panel, names, f"Fold {fold}")
         single, single_axes = figure_grid(1, 1, (7, 6))
         single_ax = single_axes[0, 0]
         _draw_boundaries(single_ax, *panel, names, f"{backbone} · fold {fold}")
         single_ax.legend(loc="upper right")
-        save_figure(single, output / f"decision_boundary_fold_{fold}.png", svg=True)
+        save_figure(single, output / f"decision_boundary_fold_{fold}.png")
     for ax in axes.ravel()[folds:]:
         ax.set_visible(False)
     handles = [Line2D([], [], color=CLASS_COLORS[name], marker="o", linestyle="", label=name) for name in names]
     fig.legend(handles=handles, loc="outside lower center", ncols=len(names), labelcolor=INK)
-    save_figure(fig, output / "decision_boundaries.png", svg=True)
+    save_figure(fig, output / "decision_boundaries.png")

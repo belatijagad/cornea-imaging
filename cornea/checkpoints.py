@@ -1,9 +1,21 @@
 import hashlib
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 import torch
+
+
+def checkpoint_path(run: str | Path, backbone: str, mode: str, fold: int) -> Path:
+    run = Path(run)
+    fold_directory = Path(backbone) / mode / f"fold_{fold}"
+    directory = run / "folds" / fold_directory
+    final = directory / "final.pt"
+    if final.is_file():
+        return final
+    best = directory / "best.pt"
+    legacy = run / fold_directory / "best.pt"
+    return legacy if not best.exists() and legacy.exists() else best
 
 
 def _state_digest(state):

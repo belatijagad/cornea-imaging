@@ -16,9 +16,15 @@ from torch.optim import AdamW
 from tqdm.auto import tqdm
 
 from cornea.checkpoints import CheckpointStore, load_checkpoint
-from cornea.config import NonNegativeFloat, PositiveFloat, PositiveInt, Precision, Probability
-from cornea.plots import plot_specificity
-
+from cornea.config import (
+    CheckpointSelection,
+    NonNegativeFloat,
+    PositiveFloat,
+    PositiveInt,
+    Precision,
+    Probability,
+)
+from cornea.plots.metrics import plot_specificity
 
 METRIC_COLUMNS = ["precision", "sensitivity", "specificity", "f1", "auroc", "average_precision"]
 
@@ -33,6 +39,7 @@ class TrainerConfig:
     validation_interval: PositiveInt = 5
     precision: Precision = "fp16"
     backbone_dir: Path | None = None
+    checkpoint_selection: CheckpointSelection = "best"
 
 
 def classification_metrics(targets, probabilities, labels, threshold=0.5):
@@ -73,7 +80,7 @@ class Trainer:
         self.val_dataloader = val_dataloader
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoint_path = self.output_dir / "best.pt"
+        self.checkpoint_path = self.output_dir / f"{config.checkpoint_selection}.pt"
         self.checkpoints = CheckpointStore(self.model, self.checkpoint_path, config.backbone_dir)
         self.criterion = nn.BCEWithLogitsLoss()
         self.optimizer = AdamW(
@@ -88,13 +95,14 @@ class Trainer:
         total_loss, seen = 0.0, 0
         targets_list, probabilities_list = [], []
         progress = tqdm(loader, desc=description, leave=False)
+        use_amp = self.amp_enabled and (training or self.config.checkpoint_selection == "best")
         for images, targets in progress:
             images, targets = images.to(self.device), targets.to(self.device)
             if training:
                 self.optimizer.zero_grad(set_to_none=True)
             with torch.set_grad_enabled(training):
                 with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype,
-                                    enabled=self.amp_enabled):
+                                    enabled=use_amp):
                     logits = self.model(images)
                     loss = self.criterion(logits, targets)
                 if training:
@@ -116,31 +124,32 @@ class Trainer:
         history = []
         validation_metrics = []
         labels = list(self.val_dataloader.dataset.label_col)
+        use_best = self.config.checkpoint_selection == "best"
         for epoch in range(1, self.config.epochs + 1):
             train_loss = self._run_epoch(
                 self.train_dataloader, training=True, description=f"Train {epoch}/{self.config.epochs}"
             )
             val_loss = None
-            improved = False
+            save = False
             row = {"epoch": epoch, "train_loss": train_loss,
                    **{f"val_macro_{name}": None for name in METRIC_COLUMNS}}
-            if epoch % self.config.validation_interval == 0 or epoch == self.config.epochs:
+            if epoch == self.config.epochs or (use_best and epoch % self.config.validation_interval == 0):
                 val_loss, targets, probabilities = self._run_epoch(self.val_dataloader)
                 metrics, _ = classification_metrics(targets, probabilities, labels, self.config.threshold)
                 validation_metrics.append(metrics.assign(
                     epoch=epoch, val_loss=val_loss, threshold=self.config.threshold,
                 ))
                 row.update({f"val_macro_{name}": metrics[name].mean() for name in METRIC_COLUMNS})
-                improved = val_loss < best_loss
+                save = val_loss < best_loss if use_best else True
             row["val_loss"] = val_loss
             history.append(row)
             tqdm.write(
                 f"Epoch {epoch:02d}/{self.config.epochs} | train loss: {train_loss:.4f}"
                 + (f" | val loss: {val_loss:.4f}" if val_loss is not None else "")
                 + (f" | specificity: {row['val_macro_specificity']:.4f}" if val_loss is not None else "")
-                + (" | saved" if improved else "")
+                + (" | saved" if save else "")
             )
-            if improved:
+            if save:
                 best_loss = val_loss
                 self.checkpoints.save({
                     "epoch": epoch, "val_loss": val_loss,
@@ -162,7 +171,7 @@ class Trainer:
         val_loss, targets, probabilities = self._run_epoch(self.val_dataloader)
         labels = saved["labels"]
         metrics, _ = classification_metrics(targets, probabilities, labels, saved["threshold"])
-        print(f"Best epoch: {saved['epoch']} | val loss: {val_loss:.4f}")
+        print(f"{self.config.checkpoint_selection.capitalize()} epoch: {saved['epoch']} | val loss: {val_loss:.4f}")
         print(metrics.round(4).to_string(index=False))
         predictions = self.val_dataloader.dataset.frame[["image_path", *labels]].copy()
         for i, label in enumerate(labels):

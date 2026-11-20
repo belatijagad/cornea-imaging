@@ -9,9 +9,10 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 from sklearn.preprocessing import normalize
 
+from cornea.checkpoints import checkpoint_path
 from cornea.config import load_config
 from cornea.dataset import load_manifest
-from cornea.embeddings import checkpoint_path, load_embeddings
+from cornea.embeddings import load_embeddings
 from cornea.plots.clustering import plot_boundary_slices
 from cornea.plots.embeddings import CLASS_NAMES
 from cornea.reports import write_classification_report
@@ -127,7 +128,8 @@ def plot_cluster_boundaries(run, backbone="resnet18", *, exclude_other=False):
         pc3 = float(np.median(xyz[~held_out, 2]))
         low, high = xyz[:, :2].min(axis=0), xyz[:, :2].max(axis=0)
         padding = np.maximum(high - low, .01) * .08
-        xx, yy = np.meshgrid(*(np.linspace(lo, hi, 350) for lo, hi in zip(low - padding, high + padding)))
+        bounds = zip(low - padding, high + padding, strict=True)
+        xx, yy = np.meshgrid(*(np.linspace(lo, hi, 350) for lo, hi in bounds))
         grid = np.column_stack([xx.ravel(), yy.ravel(), np.full(xx.size, pc3)])
         distances = ((grid[:, None] - centers) ** 2).sum(axis=2)
         regions = mapping[distances.argmin(axis=1)].reshape(xx.shape)

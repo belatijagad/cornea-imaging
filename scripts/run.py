@@ -1,9 +1,9 @@
 import argparse
-from datetime import datetime
 import random
 import re
-from pathlib import Path
 import tempfile
+from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -15,9 +15,13 @@ from torch.utils.data import DataLoader
 from cornea.config import DEFAULT_CONFIG, load_config
 from cornea.dataset import CorneaDataset, make_transforms
 from cornea.model import BACKBONES, CorneaClassifier
-from cornea.plots import MODE_NAMES, plot_sweep
+from cornea.plots import plot_sweep
+from cornea.plots.style import MODE_NAMES
 from cornea.preprocessing import (
-    CORNEA_BOX_COLUMNS, attach_cornea_boxes, attach_preprocessed_images, generate_preprocessed_images,
+    CORNEA_BOX_COLUMNS,
+    attach_cornea_boxes,
+    attach_preprocessed_images,
+    generate_preprocessed_images,
 )
 from cornea.trainer import Trainer, TrainerConfig
 
@@ -28,6 +32,7 @@ def process_data(data_root, labels_csv, labels, folder_labels, image_extensions)
     else:
         rows = []
         for folder, targets in folder_labels.items():
+            target_labels = dict(zip(labels, targets, strict=True))
             for path in sorted((data_root / folder).rglob("*")):
                 if path.is_file() and path.suffix.lower() in image_extensions:
                     prefix = re.split(
@@ -36,7 +41,7 @@ def process_data(data_root, labels_csv, labels, folder_labels, image_extensions)
                     rows.append({
                         "image_path": str(path.relative_to(data_root)),
                         "patient_id": re.sub(r"[^a-z]+", " ", prefix).strip(),
-                        **dict(zip(labels, targets)),
+                        **target_labels,
                     })
         frame = pd.DataFrame(rows)
     frame["image_path"] = frame["image_path"].map(lambda p: str((data_root / p).resolve()))
@@ -63,7 +68,7 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def seed_worker(worker_id):
+def seed_worker(_worker_id):
     seed = torch.initial_seed() % (2**32)
     random.seed(seed)
     np.random.seed(seed)
@@ -73,7 +78,7 @@ def parse_config(argv=None):
     parser = argparse.ArgumentParser(description="Run cross-validation and generate plots.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     option_groups = [
-        ("data", Path, ("data-root", "labels-csv", "cornea-boxes-csv", "preprocessed-images-csv")),
+        ("data", Path, ("data-root", "labels-csv")),
         ("trainer", Path, ("output-dir",)),
         ("trainer", int, ("epochs", "seed", "validation-interval", "folds", "batch-size", "num-workers")),
         ("transforms", int, ("image-size",)),
@@ -86,7 +91,11 @@ def parse_config(argv=None):
                                 default=argparse.SUPPRESS)
     parser.add_argument("--backbones", nargs="+", choices=BACKBONES,
                         dest="model.backbones", default=argparse.SUPPRESS)
-    parser.add_argument("--medsam", action="store_true", dest="data.medsam", default=argparse.SUPPRESS,
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--raw", action="store_true", help="Use original images and bypass configured preprocessing")
+    inputs.add_argument("--preprocessed-images-csv", type=Path, help="Use cached model inputs from this manifest")
+    inputs.add_argument("--cornea-boxes-csv", type=Path, help="Apply ellipse masks using boxes from this CSV")
+    inputs.add_argument("--medsam", action="store_true",
                         help="Run MedSAM once per image and save ellipse-masked classifier inputs")
     parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"),
                         dest="trainer.precision", default=argparse.SUPPRESS)
@@ -103,7 +112,15 @@ def parse_config(argv=None):
                                 dest="model.freeze_backbone", default=argparse.SUPPRESS)
     options = vars(parser.parse_args(argv))
     config_path = options.pop("config")
+    raw = options.pop("raw")
+    cache = options.pop("preprocessed_images_csv")
+    boxes = options.pop("cornea_boxes_csv")
+    medsam = options.pop("medsam")
+    if cache is not None and not cache.is_file():
+        parser.error(f"Preprocessed image manifest is missing: {cache}")
     overrides = {}
+    if raw or cache is not None or boxes is not None or medsam:
+        overrides["data"] = {"preprocessed_images_csv": cache, "cornea_boxes_csv": boxes, "medsam": medsam}
     for name, value in options.items():
         section, key = name.split(".")
         if name == "model.freeze_backbone":
@@ -138,6 +155,7 @@ def run_backbone(config, frame, backbone, freeze_backbone):
             validation_interval=config.trainer.validation_interval,
             precision=config.trainer.precision,
             weight_decay=config.trainer.weight_decay, threshold=config.trainer.threshold,
+            checkpoint_selection=config.trainer.checkpoint_selection,
             output_dir=output_dir / "folds" / backbone / mode / f"fold_{fold + 1}",
             backbone_dir=output_dir / "folds" / "backbones",
         )
@@ -156,11 +174,12 @@ def create_sweep_directory(output_root):
     return Path(tempfile.mkdtemp(prefix=f"sweep_{timestamp}_", dir=output_root))
 
 
-def main(argv=None):
-    config = parse_config(argv)
+def run_experiment(config):
     seed_everything(config.trainer.seed)
-    frame = process_data(config.data.data_root, config.data.labels_csv, config.data.labels,
-                         config.data.folder_labels, config.data.image_extensions)
+    frame = process_data(
+        config.data.data_root, config.data.labels_csv, config.data.labels,
+        config.data.folder_labels, config.data.image_extensions,
+    )
     frame = frame.drop(columns=["preprocessed_path", *CORNEA_BOX_COLUMNS], errors="ignore")
     source = "raw"
     cache = config.data.preprocessed_images_csv
@@ -196,7 +215,7 @@ def main(argv=None):
         for freeze in config.model.freeze_backbone
         for result in run_backbone(config, frame, backbone, freeze)
     ]
-    fold_metrics, fold_predictions = zip(*results)
+    fold_metrics, fold_predictions = zip(*results, strict=True)
     metrics = pd.concat(fold_metrics, ignore_index=True)
     predictions = pd.concat(fold_predictions, ignore_index=True)
     output = config.trainer.output_dir
@@ -219,6 +238,10 @@ def main(argv=None):
                 project_embeddings(output, backbone, mode, plot_root=output / "plots" / "embeddings")
     print(f"Sweep complete: {output.resolve()}")
     return output
+
+
+def main(argv=None):
+    return run_experiment(parse_config(argv))
 
 
 if __name__ == "__main__":

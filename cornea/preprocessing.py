@@ -3,7 +3,6 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image, ImageOps
 
-
 BOX_EDGES = ("left", "top", "right", "bottom")
 CORNEA_BOX_COLUMNS = [f"cornea_{edge}" for edge in BOX_EDGES]
 
@@ -35,7 +34,7 @@ def attach_preprocessed_images(frame, manifest_path, data_root):
     outputs = images["preprocessed_path"].map(
         lambda path: str((manifest_path.parent / path).resolve()) if path else None
     )
-    paths = frame["image_path"].map(dict(zip(sources, outputs)))
+    paths = frame["image_path"].map(pd.Series(outputs.to_numpy(), index=sources))
     missing = paths.isna()
     if missing.any():
         raise ValueError(f"Preprocessed paths are missing for {missing.sum()} images in the classifier cohort")

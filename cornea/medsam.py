@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 
 import numpy as np
+import torch
 from PIL import Image, ImageDraw
 from scipy import ndimage
-import torch
 from transformers import SamModel, SamProcessor
 
 MODEL_ID = "wanglab/medsam-vit-base"

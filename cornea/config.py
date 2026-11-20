@@ -16,10 +16,10 @@ from pydantic.dataclasses import dataclass
 
 from cornea.model import BACKBONES
 
-
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "config.yml"
 
 Precision = Literal["fp16", "bf16", "fp32"]
+CheckpointSelection = Literal["best", "final"]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 PositiveFloat = Annotated[StrictFloat, Field(gt=0)]
 NonNegativeFloat = Annotated[StrictFloat, Field(ge=0)]
@@ -43,7 +43,7 @@ class ModelConfig:
 
     @field_validator("backbones")
     @classmethod
-    def validate_backbones(cls, names):
+    def validate_backbones(_cls, names):
         for name in names:
             if name not in BACKBONES:
                 raise ValueError(f"Unknown backbone {name!r}; choose from {tuple(BACKBONES)}")
@@ -51,7 +51,7 @@ class ModelConfig:
 
     @field_validator("freeze_backbone", mode="before")
     @classmethod
-    def normalize_freeze_backbone(cls, value):
+    def normalize_freeze_backbone(_cls, value):
         return [value] if isinstance(value, bool) else value
 
 
@@ -69,6 +69,7 @@ class TrainingConfig:
     num_workers: Annotated[StrictInt, Field(ge=0)]
     precision: Precision = "fp16"
     embeddings: StrictBool = False
+    checkpoint_selection: CheckpointSelection = "best"
 
 
 @dataclass(config=ConfigDict(extra="forbid"))

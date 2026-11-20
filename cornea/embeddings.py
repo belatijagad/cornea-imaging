@@ -10,17 +10,12 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 from torch.utils.data import DataLoader
 
+from cornea.checkpoints import checkpoint_path as checkpoint_path
 from cornea.checkpoints import load_checkpoint
 from cornea.config import load_config
 from cornea.dataset import CorneaDataset, load_manifest, make_transforms
 from cornea.model import CorneaClassifier
 from cornea.plots.embeddings import COMPONENTS, plot_projection
-
-
-def checkpoint_path(run, backbone, mode, fold):
-    modern = Path(run) / "folds" / backbone / mode / f"fold_{fold}" / "best.pt"
-    legacy = run / backbone / mode / f"fold_{fold}" / "best.pt"
-    return legacy if not modern.exists() and legacy.exists() else modern
 
 
 def load_embeddings(frame, config, backbone, checkpoint, cache):

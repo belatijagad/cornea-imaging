@@ -1,11 +1,12 @@
-from itertools import product
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,7 +22,6 @@ from cornea.model import BACKBONES, CorneaClassifier, create_backbone
 from cornea.trainer import Trainer, TrainerConfig, classification_metrics
 from scripts.run import assign_folds, create_sweep_directory, main, parse_config
 
-
 DEFAULTS = load_config()
 LABELS = DEFAULTS.data.labels
 FOLDER_LABELS = DEFAULTS.data.folder_labels
@@ -30,7 +30,7 @@ FOLDER_LABELS = DEFAULTS.data.folder_labels
 class TrainingTests(unittest.TestCase):
     def test_patient_folds(self):
         rows = [
-            {"patient_id": f"patient_{patient}", **dict(zip(LABELS, targets))}
+            {"patient_id": f"patient_{patient}", **dict(zip(LABELS, targets, strict=True))}
             for patient in range(10)
             for targets in FOLDER_LABELS.values()
         ]
@@ -64,32 +64,43 @@ class TrainingTests(unittest.TestCase):
                 (root / folder).mkdir()
                 for patient in ["alpha", "bravo", "charlie", "delta"]:
                     Image.new("RGB", (40, 40), (80, 100, 120)).save(root / folder / f"{patient} 2024.jpg")
-            output = root / "outputs"
+            cached_image = root / "cached.png"
+            Image.new("RGB", (40, 40), (120, 100, 80)).save(cached_image)
+            cache_manifest = root / "cached_images.csv"
+            pd.DataFrame([
+                {"source": str(path.relative_to(root)), "preprocessed_path": cached_image.name}
+                for path in root.rglob("*.jpg")
+            ]).to_csv(cache_manifest, index=False)
             def tiny_model(**kwargs):
                 backbone = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(3, 16))
                 with patch("cornea.model.create_backbone", return_value=(backbone, 16)):
                     return CorneaClassifier(**kwargs)
 
             config = load_config()
-            config.data.preprocessed_images_csv = None
+            config.data.preprocessed_images_csv = cache_manifest
             config.model.backbones = ["resnet18", "swin_t"]
             config.model.freeze_backbone = [False, True]
             config.trainer.threshold = 0.7
             config.trainer.weight_decay = 0.02
             config_path = root / "experiment.yml"
             config.save(config_path)
+            options = ["--config", str(config_path), "--data-root", str(root), "--output-dir", str(root / "outputs"),
+                       "--folds", "2", "--epochs", "1", "--batch-size", "4", "--image-size", "32", "--no-pretrained"]
             with patch("scripts.run.CorneaClassifier", side_effect=tiny_model) as factory, patch("matplotlib.pyplot.show"):
-                output = main(["--config", str(config_path), "--data-root", str(root), "--output-dir", str(output),
-                      "--folds", "2", "--epochs", "1", "--batch-size", "4",
-                      "--image-size", "32", "--no-pretrained"])
+                output = main([*options, "--raw"])
+            with patch("scripts.run.CorneaClassifier", side_effect=tiny_model), patch("matplotlib.pyplot.show"):
+                cached_output = main([*options, "--preprocessed-images-csv", str(cache_manifest)])
+            raw_inputs = pd.read_csv(output / "manifest.csv")
+            cached_inputs = pd.read_csv(cached_output / "manifest.csv")
+            self.assertTrue(cached_inputs["preprocessed_path"].eq(str(cached_image)).all())
+            pd.testing.assert_frame_equal(raw_inputs, cached_inputs.drop(columns="preprocessed_path"))
             self.assertTrue(output.name.startswith("sweep_"))
             self.assertEqual(output.parent, root / "outputs")
-            for name in ("experiment_comparison.png", "experiment_comparison.svg",
+            for name in ("experiment_comparison.png",
                          "confusion_matrices_frozen.png", "confusion_matrices_unfrozen.png"):
                 self.assertTrue((output / "plots" / name).is_file(), name)
-                if name.endswith(".png"):
-                    with Image.open(output / "plots" / name) as image:
-                        image.verify()
+                with Image.open(output / "plots" / name) as image:
+                    image.verify()
             pooled = pd.read_csv(output / "out_of_fold_predictions.csv")
             self.assertEqual(len(pooled), 64)
             combinations = list(product(config.model.backbones, config.model.freeze_backbone))
@@ -119,11 +130,12 @@ class TrainingTests(unittest.TestCase):
                 self.assertEqual(predictions["image_path"].nunique(), 16)
                 self.assertEqual(len(predictions), 16)
             self.assertFalse(list((output / "plots").rglob("*.csv")))
+            self.assertEqual({path.suffix for path in (output / "plots").rglob("*") if path.is_file()}, {".png"})
             combined = pd.read_csv(output / "fold_metrics.csv")
             self.assertEqual(len(combined), 24)
-            self.assertEqual(set(zip(combined.backbone, combined.freeze_backbone)), set(combinations))
+            self.assertEqual(set(zip(combined.backbone, combined.freeze_backbone, strict=True)), set(combinations))
             summary = pd.read_csv(output / "summary.csv")
-            self.assertEqual(set(zip(summary.backbone, summary.freeze_backbone)), set(combinations))
+            self.assertEqual(set(zip(summary.backbone, summary.freeze_backbone, strict=True)), set(combinations))
             for stat in ("mean", "std"):
                 expected = combined.groupby(["backbone", "freeze_backbone", "label"]).specificity.agg(stat)
                 actual = summary.set_index(expected.index.names)[f"specificity_{stat}"]
@@ -206,8 +218,11 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(parse_config(["--freeze-backbone", "false", "true"]).model.freeze_backbone,
                          [False, True])
         self.assertEqual(parse_config(["--no-freeze-backbone"]).model.freeze_backbone, [False])
-        self.assertEqual(parse_config(["--preprocessed-images-csv", "cache.csv"]).data.preprocessed_images_csv,
-                         Path("cache.csv"))
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache.csv"
+            cache.touch()
+            self.assertEqual(parse_config(["--preprocessed-images-csv", str(cache)]).data.preprocessed_images_csv,
+                             cache)
         self.assertTrue(parse_config(["--medsam"]).data.medsam)
         self.assertEqual(parse_config(["--cornea-boxes-csv", "boxes.csv"]).data.cornea_boxes_csv, Path("boxes.csv"))
         self.assertEqual(load_config(overrides={"model": {"freeze_backbone": False}}).model.freeze_backbone,
@@ -260,7 +275,9 @@ class TrainingTests(unittest.TestCase):
                 loader = DataLoader(TensorDataset(torch.randn(4, 4), torch.ones(4, 3)), batch_size=2)
                 trainer = Trainer(model, TrainerConfig(output_dir=Path(directory), precision=precision), loader, loader)
                 dtypes = []
-                hook = model.register_forward_hook(lambda module, args, output: dtypes.append(output.dtype))
+                hook = model.register_forward_hook(
+                    lambda _module, _args, output, dtypes=dtypes: dtypes.append(output.dtype)
+                )
                 try:
                     before = model.weight.detach().clone()
                     loss = trainer._run_epoch(loader, training=True)
@@ -275,22 +292,26 @@ class TrainingTests(unittest.TestCase):
                 self.assertEqual(trainer.scaler.is_enabled(), precision == "fp16")
 
     def test_validation_schedule_and_checkpoint(self):
-        for epochs, interval, expected in (
-            (50, 5, list(range(5, 51, 5))),
-            (12, 5, [5, 10, 12]),
-            (3, 5, [3]),
-            (3, 1, [1, 2, 3]),
+        for epochs, interval, selection, expected in (
+            (50, 5, "best", list(range(5, 51, 5))),
+            (12, 5, "best", [5, 10, 12]),
+            (3, 5, "best", [3]),
+            (3, 1, "best", [1, 2, 3]),
+            (3, 1, "final", [3]),
         ):
-            with self.subTest(epochs=epochs, interval=interval), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(epochs=epochs, interval=interval, selection=selection), tempfile.TemporaryDirectory() as directory:
                 model = nn.Linear(1, 1)
                 loader = SimpleNamespace(dataset=SimpleNamespace(label_col=["fungal", "bacterial"]))
                 trainer = Trainer(model, TrainerConfig(
                     epochs=epochs, validation_interval=interval, output_dir=Path(directory),
+                    checkpoint_selection=selection,
                 ), loader, loader)
                 current_epoch = 0
                 validated_epochs = []
 
-                def run_epoch(loader, training=False, description="Val"):
+                def run_epoch(
+                    loader, training=False, description="Val", *, model=model, validated_epochs=validated_epochs,
+                ):
                     nonlocal current_epoch
                     if training:
                         current_epoch += 1
@@ -309,7 +330,7 @@ class TrainingTests(unittest.TestCase):
 
                 plots = []
 
-                def capture_plot():
+                def capture_plot(plots=plots):
                     ax = plt.gcf().axes[0]
                     plots.append((ax.get_ylabel(), {
                         line.get_label(): (list(line.get_xdata()), list(line.get_ydata()))
@@ -343,9 +364,10 @@ class TrainingTests(unittest.TestCase):
                 with Image.open(Path(directory) / "specificity.png") as image:
                     image.verify()
                 saved = torch.load(trainer.checkpoint_path, weights_only=True)
-                best_epoch = expected[1] if len(expected) > 1 else expected[0]
-                self.assertEqual(saved["epoch"], best_epoch)
-                self.assertEqual(saved["model_state_dict"]["weight"].item(), best_epoch)
+                selected_epoch = expected[1] if len(expected) > 1 else expected[0]
+                self.assertEqual(trainer.checkpoint_path.name, f"{selection}.pt")
+                self.assertEqual(saved["epoch"], selected_epoch)
+                self.assertEqual(saved["model_state_dict"]["weight"].item(), selected_epoch)
 
 
 
